@@ -1,63 +1,117 @@
-"use sctrict";
+let fileswatch = 'html,htm,txt,json,md,woff2' // List of files extensions for watching & hard reload
 
-var gulp = require("./../node_modules/gulp"),
-    connect = require("./../node_modules/gulp-connect"),
-    less = require('./../node_modules/gulp-less'),
-    minify = require('./../node_modules/gulp-minify'),
-    autoprefixer = require('./../node_modules/gulp-autoprefixer'),
-    cssc = require('./../node_modules/gulp-css-condense'),
-    opn = require("./../node_modules/opn");
+const { src, dest, parallel, series, watch } = require('gulp')
+const browserSync  = require('browser-sync').create()
+const ssi          = require('browsersync-ssi')
+const buildssi     = require('gulp-ssi')
+const webpack      = require('webpack-stream')
+const less         = require('gulp-less')
+const autoprefixer = require('gulp-autoprefixer')
+const rename       = require('gulp-rename')
+const imagemin     = require('gulp-imagemin')
+const newer        = require('gulp-newer')
+const rsync        = require('gulp-rsync')
+const del          = require('del')
 
-// Server
-gulp.task('connect', function() {
-  connect.server({
-    root: 'app',
-    livereload: true,
-    port: 8888
-  });
-  opn('http://localhost:8888');
-});
+function browsersync() {
+	browserSync.init({
+		server: {
+			baseDir: 'app/',
+			middleware: ssi({ baseDir: 'app/', ext: '.html' })
+		},
+		tunnel: 'yousutename', // Attempt to use the URL https://yousutename.loca.lt
+		notify: false,
+		online: true
+	})
+}
 
+function scripts() {
+	return src('app/js/app.js')
+		.pipe(webpack({
+			mode: 'production',
+			module: {
+				rules: [
+					{
+						test: /\.(js)$/,
+						exclude: /(node_modules)/,
+						loader: 'babel-loader',
+						query: {
+							presets: ['@babel/env']
+						}
+					}
+				]
+			}
+		})).on('error', function handleError() {
+			this.emit('end')
+		})
+		.pipe(rename('app.min.js'))
+		.pipe(dest('app/js'))
+		.pipe(browserSync.stream())
+}
 
-// Работа с Less
-gulp.task('less', function () {
-  gulp.src('app/less/*.less')
-    .pipe(less()) 
-    .pipe(autoprefixer({ browsers: ["> 0%"] }))   
-    .pipe(cssc({
-            consolidateViaDeclarations: false,
-            consolidateViaSelectors: false,
-            consolidateMediaQueries: true
-        })) 
-    .pipe(gulp.dest('app/css/'))
-    .pipe(connect.reload());
-});
+function styles() {
+	return src('app/less/main.less')
+		.pipe(less({ outputStyle: 'compressed' }))
+		.pipe(autoprefixer({ overrideBrowserslist: ['last 10 versions'], grid: true }))
+		.pipe(rename('app.min.css'))
+		.pipe(dest('app/css'))
+		.pipe(browserSync.stream())
+}
 
-// Работа с HTML
-gulp.task('html', function () {
-  gulp.src('app/*.html')
-    .pipe(connect.reload());
-});
+function images() {
+	return src(['app/images/src/**/*'])
+		.pipe(newer('app/images/dist'))
+		.pipe(imagemin())
+		.pipe(dest('app/images/dist'))
+		.pipe(browserSync.stream())
+}
 
-// Работа с JS
-gulp.task('js', function(){
-  gulp.src('app/pre-js/*.js')
-    .pipe(minify({
-        ext: {
-            min: '.min.js'
-        },
-        noSource: true,
-        ignoreFiles: ['*.min.js']
-    }))
-    .pipe(gulp.dest('app/js'))
-});
+function buildcopy() {
+	return src([
+		'{app/js,app/css}/*.min.*',
+		'app/images/**/*.*',
+		'!app/images/src/**/*',
+		'app/fonts/**/*'
+	], { base: 'app/' })
+	.pipe(dest('dist'))
+}
 
-// Слежка
-gulp.task('watch', function () {
-  gulp.watch(['app/*.html'], ['html']);
-  gulp.watch(['app/pre-js/*.js'], ['js']);
-  gulp.watch(['app/less/*.less'], ['less']);
-});
+function buildhtml() {
+	// return src(['app/**/*.html', '!app/parts/**/*'])
+	// 	.pipe(buildssi({ root: 'app/' }))
+	// 	.pipe(dest('dist'))
+}
 
-// Задача по-умолчанию
-gulp.task('default', ['connect', 'watch']);
+function cleandist() {
+	return del('dist/**/*', { force: true })
+}
+
+function deploy() {
+	return src('dist/')
+		.pipe(rsync({
+			root: 'dist/',
+			hostname: 'username@yousite.com',
+			destination: 'yousite/public_html/',
+			include: [/* '*.htaccess' */], // Included files to deploy,
+			exclude: [ '**/Thumbs.db', '**/*.DS_Store' ],
+			recursive: true,
+			archive: true,
+			silent: false,
+			compress: true
+		}))
+}
+
+function startwatch() {
+	watch('app/less/**/*', { usePolling: true }, styles)
+	watch(['app/js/**/*.js', '!app/js/**/*.min.js'], { usePolling: true }, scripts)
+	watch('app/images/src/**/*.{jpg,jpeg,png,webp,svg,gif}', { usePolling: true }, images)
+	watch(`app/**/*.{${fileswatch}}`, { usePolling: true }).on('change', browserSync.reload)
+}
+
+exports.scripts = scripts
+exports.styles  = styles
+exports.images  = images
+exports.deploy  = deploy
+exports.assets  = series(scripts, styles, images)
+exports.build   = series(cleandist, scripts, styles, images, buildcopy, buildhtml)
+exports.default = series(scripts, styles, images, parallel(browsersync, startwatch))
